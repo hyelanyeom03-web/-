@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { JoystickData, ButtonStates, GyroData } from '../types/controller';
 import { sounds } from '../utils/audio';
+import { RealtimeChannel } from '../utils/realtime';
 
 interface HostScreenProps {
   roomId: string;
@@ -76,13 +77,14 @@ interface Laser {
 }
 
 export const HostScreen: React.FC<HostScreenProps> = ({ roomId, onSwitchToController }) => {
-  const wsRef = useRef<WebSocket | null>(null);
+  const channelRef = useRef<RealtimeChannel | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Connection & Controller state
   const [controllerConnected, setControllerConnected] = useState(false);
   const [controllerDevice, setControllerDevice] = useState<string>('모바일 기기');
   const [controllerLatency, setControllerLatency] = useState<number>(12);
+  const [connectionStatusText, setConnectionStatusText] = useState<string>('연결 대기 중');
   const [gameMode, setGameMode] = useState<GameMode>('hovercraft');
   const [isMuted, setIsMuted] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -118,8 +120,18 @@ export const HostScreen: React.FC<HostScreenProps> = ({ roomId, onSwitchToContro
     light: true,
   });
 
-  // URL for QR Code
-  const controllerUrl = `${window.location.origin}/?mode=controller&room=${encodeURIComponent(roomId)}`;
+  // URL for QR Code: Use window.location.href to preserve subpaths (crucial for GitHub Pages /repo-name/!)
+  const getControllerUrl = () => {
+    try {
+      const currentUrl = new URL(window.location.href);
+      currentUrl.searchParams.set('mode', 'controller');
+      currentUrl.searchParams.set('room', roomId);
+      return currentUrl.toString();
+    } catch {
+      return `${window.location.origin}${window.location.pathname}?mode=controller&room=${encodeURIComponent(roomId)}`;
+    }
+  };
+  const controllerUrl = getControllerUrl();
 
   // Copy link
   const handleCopyLink = () => {
@@ -128,100 +140,72 @@ export const HostScreen: React.FC<HostScreenProps> = ({ roomId, onSwitchToContro
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Trigger haptic feedback to phone via WebSocket
+  // Trigger haptic feedback to phone via Realtime channel
   const sendHapticToController = useCallback((event: string, pattern: number[] = [40, 20, 40]) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'haptic_feedback',
+    if (channelRef.current) {
+      channelRef.current.send({
+        type: 'device_feedback',
         roomId,
         event,
         pattern,
-      }));
+      });
     }
   }, [roomId]);
 
-  // Connect Host WebSocket
+  // Connect Host via Hybrid Realtime Channel (WebRTC PeerJS P2P + WebSocket fallback)
   useEffect(() => {
-    let reconnectTimeout: ReturnType<typeof setTimeout>;
-    let isDisposed = false;
-
-    const connect = () => {
-      if (isDisposed) return;
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws?roomId=${encodeURIComponent(roomId)}&role=host`;
-
-      try {
-        const ws = new WebSocket(wsUrl);
-        wsRef.current = ws;
-
-        ws.onopen = () => {
-          if (isDisposed) return;
-          ws.send(JSON.stringify({
-            type: 'join',
-            roomId,
-            role: 'host',
-            name: 'Main Screen Display',
-          }));
-        };
-
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (data.type === 'peer_joined') {
-              if (data.role === 'controller') {
-                setControllerConnected(true);
-                setControllerDevice(data.name || '스마트폰');
-                confetti({ particleCount: 50, spread: 60, origin: { y: 0.8 } });
-                sounds.playCollect();
-              }
-            } else if (data.type === 'peer_left') {
-              if (data.role === 'controller' && data.totalInRoom <= 1) {
-                setControllerConnected(false);
-              }
-            } else if (data.type === 'controller_input') {
-              setControllerConnected(true);
-              const p = data.payload;
-              if (p && p.joystick) {
-                inputRef.current.joystick = p.joystick;
-                inputRef.current.buttons = p.buttons || inputRef.current.buttons;
-                inputRef.current.gyro = p.gyro;
-                inputRef.current.lastReceived = Date.now();
-
-                setLatestInput(p.joystick);
-                if (p.buttons) setLatestButtons(p.buttons);
-                setPacketCount((c) => c + 1);
-
-                if (p.timestamp) {
-                  const lat = Math.max(1, Math.min(200, Date.now() - p.timestamp));
-                  setControllerLatency(lat);
-                }
-              }
-            }
-          } catch {
-            // Non JSON
+    const channel = new RealtimeChannel({
+      roomId,
+      role: 'host',
+      name: 'Main Screen Display',
+      onStatusChange: (_status, info) => {
+        if (info) setConnectionStatusText(info);
+      },
+      onConnect: () => {
+        // Ready for peers
+      },
+      onDisconnect: () => {
+        setControllerConnected(false);
+      },
+      onMessage: (data) => {
+        if (data.type === 'peer_joined') {
+          if (data.role === 'controller') {
+            setControllerConnected(true);
+            setControllerDevice(data.name || '스마트폰');
+            confetti({ particleCount: 50, spread: 60, origin: { y: 0.8 } });
+            sounds.playCollect();
           }
-        };
+        } else if (data.type === 'peer_left') {
+          if (data.role === 'controller' && (data.totalInRoom === undefined || data.totalInRoom <= 1)) {
+            setControllerConnected(false);
+          }
+        } else if (data.type === 'controller_input' || data.type === 'input') {
+          setControllerConnected(true);
+          const p = data.payload || data;
+          if (p && p.joystick) {
+            inputRef.current.joystick = p.joystick;
+            inputRef.current.buttons = p.buttons || inputRef.current.buttons;
+            inputRef.current.gyro = p.gyro;
+            inputRef.current.lastReceived = Date.now();
 
-        ws.onclose = () => {
-          if (isDisposed) return;
-          reconnectTimeout = setTimeout(connect, 2000);
-        };
+            setLatestInput(p.joystick);
+            if (p.buttons) setLatestButtons(p.buttons);
+            setPacketCount((c) => c + 1);
 
-        ws.onerror = () => {
-          ws.close();
-        };
-      } catch (err) {
-        console.error('Host WS error:', err);
-        reconnectTimeout = setTimeout(connect, 2000);
-      }
-    };
+            if (p.timestamp) {
+              const lat = Math.max(1, Math.min(200, Date.now() - p.timestamp));
+              setControllerLatency(lat);
+            }
+          }
+        }
+      },
+    });
 
-    connect();
+    channelRef.current = channel;
 
     return () => {
-      isDisposed = true;
-      clearTimeout(reconnectTimeout);
-      if (wsRef.current) wsRef.current.close();
+      channel.destroy();
+      channelRef.current = null;
     };
   }, [roomId]);
 

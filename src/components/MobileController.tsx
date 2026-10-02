@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { VirtualJoystick } from './VirtualJoystick';
 import { JoystickData, ButtonStates, GyroData } from '../types/controller';
+import { RealtimeChannel } from '../utils/realtime';
 import {
   Wifi,
   WifiOff,
@@ -23,8 +24,9 @@ interface MobileControllerProps {
 }
 
 export const MobileController: React.FC<MobileControllerProps> = ({ roomId, onLeave }) => {
-  const wsRef = useRef<WebSocket | null>(null);
+  const channelRef = useRef<RealtimeChannel | null>(null);
   const [isConnected, setIsConnected] = useState(false);
+  const [connectionText, setConnectionText] = useState('연결 중...');
   const [ping, setPing] = useState<number | null>(null);
   const [isMuted, setIsMuted] = useState(false);
   const [gyroEnabled, setGyroEnabled] = useState(false);
@@ -58,98 +60,72 @@ export const MobileController: React.FC<MobileControllerProps> = ({ roomId, onLe
   const stateRef = useRef({ joystick, buttons, gyro });
   stateRef.current = { joystick, buttons, gyro };
 
-  // Connect WebSocket
+  // Connect via Universal Realtime Channel (WebRTC PeerJS P2P + WebSocket)
   useEffect(() => {
-    let reconnectTimeout: ReturnType<typeof setTimeout>;
-    let pingInterval: ReturnType<typeof setInterval>;
-    let isDisposed = false;
-
-    const connect = () => {
-      if (isDisposed) return;
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws?roomId=${encodeURIComponent(roomId)}&role=controller`;
-
-      try {
-        const ws = new WebSocket(wsUrl);
-        wsRef.current = ws;
-
-        ws.onopen = () => {
-          if (isDisposed) return;
+    const channel = new RealtimeChannel({
+      roomId,
+      role: 'controller',
+      name: navigator.userAgent.includes('iPhone')
+        ? 'iPhone'
+        : navigator.userAgent.includes('Android')
+        ? 'Android'
+        : '모바일 패드',
+      onConnect: () => {
+        setIsConnected(true);
+        setPing(12);
+      },
+      onDisconnect: () => {
+        setIsConnected(false);
+      },
+      onStatusChange: (status, info) => {
+        if (status === 'connected') {
           setIsConnected(true);
-          // Send explicit join
-          ws.send(JSON.stringify({
-            type: 'join',
-            roomId,
-            role: 'controller',
-            name: navigator.userAgent.includes('iPhone') ? 'iPhone' : navigator.userAgent.includes('Android') ? 'Android' : 'Mobile Pad',
-          }));
-
-          // Start ping checks
-          pingInterval = setInterval(() => {
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'ping', t: Date.now() }));
-            }
-          }, 3000);
-        };
-
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (data.type === 'pong' && data.t) {
-              setPing(Date.now() - data.t);
-            } else if (data.type === 'device_feedback') {
-              // Haptic feedback from host (e.g. crash or coin pickup!)
-              if (navigator.vibrate) {
-                navigator.vibrate(data.pattern || [60, 40, 60]);
-              }
-              setHapticCount((prev) => prev + 1);
-              if (data.event === 'collect') {
-                sounds.playCollect();
-              } else if (data.event === 'crash') {
-                sounds.playCrash();
-              }
-            }
-          } catch {
-            // Non-JSON message
-          }
-        };
-
-        ws.onclose = () => {
-          if (isDisposed) return;
+          setPing(10);
+        } else if (status === 'disconnected') {
           setIsConnected(false);
-          setPing(null);
-          reconnectTimeout = setTimeout(connect, 2000);
-        };
+        }
+        if (info) setConnectionText(info);
+      },
+      onMessage: (data) => {
+        if (data.type === 'pong' && data.t) {
+          setPing(Date.now() - data.t);
+        } else if (data.type === 'device_feedback') {
+          // Haptic feedback from host (e.g. crash or coin pickup!)
+          if (navigator.vibrate) {
+            navigator.vibrate(data.pattern || [60, 40, 60]);
+          }
+          setHapticCount((prev) => prev + 1);
+          if (data.event === 'collect') {
+            sounds.playCollect();
+          } else if (data.event === 'crash') {
+            sounds.playCrash();
+          }
+        }
+      },
+    });
 
-        ws.onerror = () => {
-          ws.close();
-        };
-      } catch (err) {
-        console.error('WS controller connect error:', err);
-        reconnectTimeout = setTimeout(connect, 2000);
-      }
-    };
+    channelRef.current = channel;
 
-    connect();
+    // Periodic ping
+    const pingTimer = setInterval(() => {
+      channel.send({ type: 'ping', t: Date.now() });
+    }, 3000);
 
     return () => {
-      isDisposed = true;
-      clearTimeout(reconnectTimeout);
-      clearInterval(pingInterval);
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+      clearInterval(pingTimer);
+      channel.destroy();
+      channelRef.current = null;
     };
   }, [roomId]);
 
-  // Transmit inputs to WebSocket
+  // Transmit inputs to Host via Realtime channel
   const sendInputPacket = useCallback((overrideJoystick?: JoystickData, overrideButtons?: ButtonStates) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    if (!channelRef.current) return;
     const currentJoy = overrideJoystick || stateRef.current.joystick;
     const currentBtn = overrideButtons || stateRef.current.buttons;
     const currentGyro = stateRef.current.gyro;
 
-    wsRef.current.send(JSON.stringify({
+    channelRef.current.send({
       type: 'input',
       roomId,
       payload: {
@@ -158,7 +134,7 @@ export const MobileController: React.FC<MobileControllerProps> = ({ roomId, onLe
         gyro: currentGyro,
         timestamp: Date.now(),
       },
-    }));
+    });
   }, [roomId]);
 
   // Joystick move handler
