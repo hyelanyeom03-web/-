@@ -1,0 +1,6 @@
+{
+  "name": "QR Joystick Controller & Playground",
+  "description": "Scan the QR code with your smartphone to turn it into a wireless touch joystick and control interactive vehicles, drones, and arcade games on your screen in real time.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
