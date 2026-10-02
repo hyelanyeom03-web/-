@@ -120,15 +120,38 @@ export const HostScreen: React.FC<HostScreenProps> = ({ roomId, onSwitchToContro
     light: true,
   });
 
-  // URL for QR Code: Use window.location.href to preserve subpaths (crucial for GitHub Pages /repo-name/!)
+  const [customBaseUrl, setCustomBaseUrl] = useState<string>('');
+
+  // URL for QR Code: Use window.location.href to preserve subpaths, and convert ais-dev- to ais-pre- to prevent Google 403!
   const getControllerUrl = () => {
     try {
+      if (customBaseUrl.trim()) {
+        const trimmed = customBaseUrl.trim();
+        const base = trimmed.startsWith('http') ? trimmed : `https://${trimmed}`;
+        const customUrl = new URL(base);
+        customUrl.searchParams.set('mode', 'controller');
+        customUrl.searchParams.set('room', roomId);
+        return customUrl.toString();
+      }
+
       const currentUrl = new URL(window.location.href);
+
+      // CRITICAL FIX: If running inside AI Studio dev environment (ais-dev-*.run.app),
+      // ais-dev requires Google Cloud login and returns Google 403 Forbidden to mobile phones!
+      // The public shared URL replaces 'ais-dev-' with 'ais-pre-' which is public!
+      if (currentUrl.hostname.startsWith('ais-dev-')) {
+        currentUrl.hostname = currentUrl.hostname.replace('ais-dev-', 'ais-pre-');
+      }
+
       currentUrl.searchParams.set('mode', 'controller');
       currentUrl.searchParams.set('room', roomId);
       return currentUrl.toString();
     } catch {
-      return `${window.location.origin}${window.location.pathname}?mode=controller&room=${encodeURIComponent(roomId)}`;
+      let origin = window.location.origin;
+      if (origin.includes('ais-dev-')) {
+        origin = origin.replace('ais-dev-', 'ais-pre-');
+      }
+      return `${origin}${window.location.pathname}?mode=controller&room=${encodeURIComponent(roomId)}`;
     }
   };
   const controllerUrl = getControllerUrl();
@@ -1012,22 +1035,44 @@ export const HostScreen: React.FC<HostScreenProps> = ({ roomId, onSwitchToContro
 
       {/* Large QR Code Modal */}
       {isQrModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 max-w-sm w-full shadow-2xl flex flex-col items-center gap-4 text-center">
-            <h3 className="text-lg font-bold text-white">핸드폰으로 스캔하세요</h3>
-            <p className="text-xs text-slate-400">
-              스마트폰 카메라로 아래 QR 코드를 비추면 즉시 조이스틱 컨트롤러가 실행됩니다.
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 max-w-md w-full shadow-2xl flex flex-col items-center gap-4 text-center">
+            <div className="flex items-center justify-between w-full">
+              <h3 className="text-lg font-bold text-white">핸드폰 QR 스캔 조이스틱</h3>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                Google 403 방지 완료
+              </span>
+            </div>
+
+            <p className="text-xs text-slate-400 leading-relaxed text-left">
+              스마트폰 기본 카메라로 QR 코드를 비추면 무선 조이스틱이 열립니다. 
+              <br />
+              <span className="text-emerald-400 font-medium">Tip:</span> Google AI Studio의 비공개 개발 주소 대신 누구나 접근 가능한 <span className="font-mono text-cyan-300">공개 주소(ais-pre-)</span>로 자동 변환되어 403 에러 없이 바로 접속됩니다.
             </p>
 
             <div className="p-4 bg-white rounded-2xl shadow-xl">
-              <QRCodeSVG value={controllerUrl} size={210} level="H" />
+              <QRCodeSVG value={controllerUrl} size={190} level="H" />
             </div>
 
-            <div className="w-full bg-slate-950/80 p-2.5 rounded-xl border border-slate-800 font-mono text-[11px] text-cyan-400 break-all select-all">
+            <div className="w-full bg-slate-950/80 p-2.5 rounded-xl border border-slate-800 font-mono text-[11px] text-cyan-400 break-all select-all text-left">
               {controllerUrl}
             </div>
 
-            <div className="flex items-center gap-2 w-full">
+            {/* Custom GitHub / Production URL Override */}
+            <div className="w-full text-left">
+              <label className="text-[11px] font-medium text-slate-300 mb-1 block">
+                깃허브 페이지 주소 직접 입력 (선택사항):
+              </label>
+              <input
+                type="text"
+                placeholder="예: https://내아이디.github.io/레포이름"
+                value={customBaseUrl}
+                onChange={(e) => setCustomBaseUrl(e.target.value)}
+                className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-cyan-500 font-mono"
+              />
+            </div>
+
+            <div className="flex items-center gap-2 w-full pt-1">
               <button
                 onClick={handleCopyLink}
                 className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition-colors flex items-center justify-center gap-1.5"
@@ -1035,6 +1080,16 @@ export const HostScreen: React.FC<HostScreenProps> = ({ roomId, onSwitchToContro
                 {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
                 <span>{copied ? '복사완료' : 'URL 복사'}</span>
               </button>
+
+              <a
+                href={controllerUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition-colors flex items-center justify-center gap-1.5"
+              >
+                <ExternalLink className="w-4 h-4" />
+                <span>새 탭 열기</span>
+              </a>
 
               <button
                 onClick={() => setIsQrModalOpen(false)}
